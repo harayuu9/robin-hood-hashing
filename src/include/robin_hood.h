@@ -52,6 +52,8 @@
 #    include <string_view>
 #endif
 
+#include "Heap/hryHeap.h"
+
 // #define ROBIN_HOOD_LOG_ENABLED
 #ifdef ROBIN_HOOD_LOG_ENABLED
 #    include <iostream>
@@ -374,7 +376,8 @@ public:
         , mListForFree(nullptr) {}
 
     BulkPoolAllocator(BulkPoolAllocator&& o) noexcept
-        : mHead(o.mHead)
+        : mpHeap(o.mpHeap)
+        , mHead(o.mHead)
         , mListForFree(o.mListForFree) {
         o.mListForFree = nullptr;
         o.mHead = nullptr;
@@ -382,6 +385,7 @@ public:
 
     BulkPoolAllocator& operator=(BulkPoolAllocator&& o) noexcept {
         reset();
+        mpHeap = o.mpHeap;
         mHead = o.mHead;
         mListForFree = o.mListForFree;
         o.mListForFree = nullptr;
@@ -404,8 +408,8 @@ public:
     void reset() noexcept {
         while (mListForFree) {
             T* tmp = *mListForFree;
-            ROBIN_HOOD_LOG("std::free")
-            std::free(mListForFree);
+            ROBIN_HOOD_LOG("hry::Heap::free")
+            mpHeap->free(mListForFree);
             mListForFree = reinterpret_cast_no_cast_align_warning<T**>(tmp);
         }
         mHead = nullptr;
@@ -440,8 +444,8 @@ public:
         // calculate number of available elements in ptr
         if (numBytes < ALIGNMENT + ALIGNED_SIZE) {
             // not enough data for at least one element. Free and return.
-            ROBIN_HOOD_LOG("std::free")
-            std::free(ptr);
+            ROBIN_HOOD_LOG("hry::Heap::free")
+            mpHeap->free(ptr);
         } else {
             ROBIN_HOOD_LOG("add to buffer")
             add(ptr, numBytes);
@@ -508,9 +512,9 @@ private:
 
         // alloc new memory: [prev |T, T, ... T]
         size_t const bytes = ALIGNMENT + ALIGNED_SIZE * numElementsToAlloc;
-        ROBIN_HOOD_LOG("std::malloc " << bytes << " = " << ALIGNMENT << " + " << ALIGNED_SIZE
+        ROBIN_HOOD_LOG("hry::Heap::allocate " << bytes << " = " << ALIGNMENT << " + " << ALIGNED_SIZE
                                       << " * " << numElementsToAlloc)
-        add(assertNotNull<std::bad_alloc>(std::malloc(bytes)), bytes);
+        add(assertNotNull<std::bad_alloc>(mpHeap->allocate(bytes, ALIGNMENT), bytes));
         return mHead;
     }
 
@@ -535,6 +539,9 @@ private:
 
     T* mHead{nullptr};
     T** mListForFree{nullptr};
+
+protected:
+    hry::Heap* mpHeap = nullptr;
 };
 
 template <typename T, size_t MinSize, size_t MaxSize, bool IsFlat>
@@ -546,9 +553,11 @@ struct NodeAllocator<T, MinSize, MaxSize, true> {
 
     // we are not using the data, so just free it.
     void addOrFree(void* ptr, size_t ROBIN_HOOD_UNUSED(numBytes) /*unused*/) noexcept {
-        ROBIN_HOOD_LOG("std::free")
-        std::free(ptr);
+        mpHeap->free(ptr);
     }
+
+protected:
+    hry::Heap* mpHeap = nullptr;
 };
 
 template <typename T, size_t MinSize, size_t MaxSize>
@@ -1579,7 +1588,8 @@ public:
     }
 
     Table(const Table& o)
-        : WHash(static_cast<const WHash&>(o))
+        : DataPool::mpHeap(o.mpHeap)
+        , WHash(static_cast<const WHash&>(o))
         , WKeyEqual(static_cast<const WKeyEqual&>(o))
         , DataPool(static_cast<const DataPool&>(o)) {
         ROBIN_HOOD_TRACE(this)
@@ -1590,11 +1600,11 @@ public:
             auto const numElementsWithBuffer = calcNumElementsWithBuffer(o.mMask + 1);
             auto const numBytesTotal = calcNumBytesTotal(numElementsWithBuffer);
 
-            ROBIN_HOOD_LOG("std::malloc " << numBytesTotal << " = calcNumBytesTotal("
+            ROBIN_HOOD_LOG("hry::Heap::allocate " << numBytesTotal << " = calcNumBytesTotal("
                                           << numElementsWithBuffer << ")")
             mHashMultiplier = o.mHashMultiplier;
-            mKeyVals = static_cast<Node*>(
-                detail::assertNotNull<std::bad_alloc>(std::malloc(numBytesTotal)));
+            mKeyVals = static_cast<Node*>(detail::assertNotNull<std::bad_alloc>(
+                DataPool::mpHeap->allocate(numBytesTotal, alignof(Node))));
             // no need for calloc because clonData does memcpy
             mInfo = reinterpret_cast<uint8_t*>(mKeyVals + numElementsWithBuffer);
             mNumElements = o.mNumElements;
@@ -1642,16 +1652,16 @@ public:
             // no luck: we don't have the same array size allocated, so we need to realloc.
             if (0 != mMask) {
                 // only deallocate if we actually have data!
-                ROBIN_HOOD_LOG("std::free")
-                std::free(mKeyVals);
+                ROBIN_HOOD_LOG("hry::Heap::free")
+                DataPool::mpHeap->free(mKeyVals);
             }
 
             auto const numElementsWithBuffer = calcNumElementsWithBuffer(o.mMask + 1);
             auto const numBytesTotal = calcNumBytesTotal(numElementsWithBuffer);
-            ROBIN_HOOD_LOG("std::malloc " << numBytesTotal << " = calcNumBytesTotal("
+            ROBIN_HOOD_LOG("hry::Heap::allocate " << numBytesTotal << " = calcNumBytesTotal("
                                           << numElementsWithBuffer << ")")
-            mKeyVals = static_cast<Node*>(
-                detail::assertNotNull<std::bad_alloc>(std::malloc(numBytesTotal)));
+            mKeyVals = static_cast<Node*>(detail::assertNotNull<std::bad_alloc>(
+                DataPool::mpHeap->allocate(numBytesTotal, alignof(Node))));
 
             // no need for calloc here because cloneData performs a memcpy.
             mInfo = reinterpret_cast<uint8_t*>(mKeyVals + numElementsWithBuffer);
@@ -1669,6 +1679,10 @@ public:
         cloneData(o);
 
         return *this;
+    }
+
+    void setHeap(hry::Heap* pHeap) {
+        DataPool::mpHeap = pHeap;
     }
 
     // Swaps everything between the two maps.
@@ -2240,7 +2254,7 @@ private:
             if (oldKeyVals != reinterpret_cast_no_cast_align_warning<Node*>(&mMask)) {
                 // don't destroy old data: put it into the pool instead
                 if (forceFree) {
-                    std::free(oldKeyVals);
+                    DataPool::mpHeap->free(oldKeyVals);
                 } else {
                     DataPool::addOrFree(oldKeyVals, calcNumBytesTotal(oldMaxElementsWithBuffer));
                 }
@@ -2326,8 +2340,8 @@ private:
         auto const numBytesTotal = calcNumBytesTotal(numElementsWithBuffer);
         ROBIN_HOOD_LOG("std::calloc " << numBytesTotal << " = calcNumBytesTotal("
                                       << numElementsWithBuffer << ")")
-        mKeyVals = reinterpret_cast<Node*>(
-            detail::assertNotNull<std::bad_alloc>(std::malloc(numBytesTotal)));
+        mKeyVals = reinterpret_cast<Node*>(detail::assertNotNull<std::bad_alloc>(
+            DataPool::mpHeap->allocate(numBytesTotal, alignof(Node))));
         mInfo = reinterpret_cast<uint8_t*>(mKeyVals + numElementsWithBuffer);
         std::memset(mInfo, 0, numBytesTotal - numElementsWithBuffer * sizeof(Node));
 
@@ -2475,8 +2489,8 @@ private:
         // reports a compile error: attempt to free a non-heap object 'fm'
         // [-Werror=free-nonheap-object]
         if (mKeyVals != reinterpret_cast_no_cast_align_warning<Node*>(&mMask)) {
-            ROBIN_HOOD_LOG("std::free")
-            std::free(mKeyVals);
+            ROBIN_HOOD_LOG("hry::Heap::free")
+            DataPool::mpHeap->free(mKeyVals);
         }
     }
 
