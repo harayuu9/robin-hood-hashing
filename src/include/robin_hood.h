@@ -215,7 +215,11 @@ static Counts& counts() {
 #endif
 
 // helpers for C++ versions, see https://gcc.gnu.org/onlinedocs/cpp/Standard-Predefined-Macros.html
-#define ROBIN_HOOD_PRIVATE_DEFINITION_CXX() __cplusplus
+#ifdef _MSC_VER
+    #define ROBIN_HOOD_PRIVATE_DEFINITION_CXX() _MSVC_LANG
+#else
+    #define ROBIN_HOOD_PRIVATE_DEFINITION_CXX() __cplusplus
+#endif
 #define ROBIN_HOOD_PRIVATE_DEFINITION_CXX98() 199711L
 #define ROBIN_HOOD_PRIVATE_DEFINITION_CXX11() 201103L
 #define ROBIN_HOOD_PRIVATE_DEFINITION_CXX14() 201402L
@@ -841,6 +845,7 @@ ROBIN_HOOD_HASH_INT(bool);
 ROBIN_HOOD_HASH_INT(char);
 ROBIN_HOOD_HASH_INT(signed char);
 ROBIN_HOOD_HASH_INT(unsigned char);
+ROBIN_HOOD_HASH_INT(char8_t);
 ROBIN_HOOD_HASH_INT(char16_t);
 ROBIN_HOOD_HASH_INT(char32_t);
 #if ROBIN_HOOD(HAS_NATIVE_WCHART)
